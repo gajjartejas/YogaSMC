@@ -104,7 +104,7 @@ IOReturn YogaSMCUserClient::readEC(UInt64 offset, UInt8* output, IOByteCount *ou
         return kIOReturnBadArgument;
     }
 
-    if (offset + *outputSizeP > 0x100) {
+    if (offset >= 0x100 || !*outputSizeP || *outputSizeP > 0x100 - offset) {
         AlwaysLog("%s invalid range", __FUNCTION__);
         return kIOReturnBadArgument;
     }
@@ -117,7 +117,7 @@ IOReturn YogaSMCUserClient::readEC(UInt64 offset, UInt8* output, IOByteCount *ou
         }
         *output = result;
     } else {
-        OSData *result;
+        OSData *result = nullptr;
         if (fProvider->method_recb(UInt32(offset), UInt32(*outputSizeP), &result) != kIOReturnSuccess) {
             AlwaysLog("%s recb failed", __FUNCTION__);
             return kIOReturnIOError;
@@ -166,21 +166,28 @@ IOReturn YogaSMCUserClient::writeEC(UInt64 offset, UInt8* input, IOByteCount inp
 IOReturn YogaSMCUserClient::readECName(char* name, UInt8* output) {
     if (!fProvider || !fProvider->isOpen(this))
         return kIOReturnNotReady;
+    if (!name || !output)
+        return kIOReturnBadArgument;
 
-    UInt32 result = 0;
-    if (fProvider->ec->evaluateInteger(name, &result) != kIOReturnSuccess) {
-        AlwaysLog("%s read %s failed", __FUNCTION__, name);
-        return kIOReturnIOError;
+    // The external method accepts exactly four bytes, not a C string.
+    char field[5] = {};
+    for (unsigned i = 0; i < 4; ++i) {
+        const char c = name[i];
+        if (!(c == '_' || (c >= 'A' && c <= 'Z') || (i > 0 && c >= '0' && c <= '9')))
+            return kIOReturnBadArgument;
+        field[i] = c;
     }
-
+    UInt32 result = 0;
+    IOReturn ret = fProvider->readECName(field, &result);
+    if (ret != kIOReturnSuccess)
+        return ret;
     *output = result;
-
-    DebugLog("%s @ %s", __FUNCTION__, name);
+    DebugLog("%s @ %s", __FUNCTION__, field);
     return kIOReturnSuccess;
 }
 
 IOReturn YogaSMCUserClient::registerNotificationPort(mach_port_t port, UInt32 type, io_user_reference_t refCon) {
-    if (!fProvider->isOpen(this) || !fProvider)
+    if (!fProvider || !fProvider->isOpen(this))
         return kIOReturnNotReady;
 
     if (fProvider->client) {

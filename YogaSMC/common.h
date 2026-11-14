@@ -28,32 +28,25 @@
 #define ECReadCap    BIT(0)
 #define ECWriteCap   BIT(1)
 
-#define getPropertyBoolean(prompt)     \
-    do { \
-        value = OSDynamicCast(OSBoolean, dict->getObject(prompt));   \
-        if (value == nullptr) { \
-            AlwaysLog(valueInvalid, prompt);  \
-            continue;   \
-        } \
-    } while (0)
+// Property-handler macros must continue the enclosing iterator loop on a type
+// mismatch. A do/while wrapper would consume continue and leave value null.
+#define getPropertyBoolean(prompt) \
+    if ((value = OSDynamicCast(OSBoolean, dict->getObject(prompt))) == nullptr) { \
+        AlwaysLog(valueInvalid, prompt); \
+        continue; \
+    }
 
-#define getPropertyNumber(prompt)     \
-    do { \
-        value = OSDynamicCast(OSNumber, dict->getObject(prompt));   \
-        if (value == nullptr) { \
-            AlwaysLog(valueInvalid, prompt);  \
-            continue;   \
-        } \
-    } while (0)
+#define getPropertyNumber(prompt) \
+    if ((value = OSDynamicCast(OSNumber, dict->getObject(prompt))) == nullptr) { \
+        AlwaysLog(valueInvalid, prompt); \
+        continue; \
+    }
 
-#define getPropertyString(prompt)     \
-    do { \
-        value = OSDynamicCast(OSString, dict->getObject(prompt));   \
-        if (value == nullptr) { \
-            AlwaysLog(valueInvalid, prompt);  \
-            continue;   \
-        } \
-    } while (0)
+#define getPropertyString(prompt) \
+    if ((value = OSDynamicCast(OSString, dict->getObject(prompt))) == nullptr) { \
+        AlwaysLog(valueInvalid, prompt); \
+        continue; \
+    }
 
 #define setPropertyBoolean(dict, name, boolean) \
     do { dict->setObject(name, boolean ? kOSBooleanTrue : kOSBooleanFalse); } while (0)

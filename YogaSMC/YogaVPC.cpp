@@ -345,9 +345,17 @@ void YogaVPC::setPropertiesGated(OSObject* props) {
     return;
 }
 
-IOReturn YogaVPC::setProperties(OSObject *props) {
-    commandGate->runAction(OSMemberFunctionCast(IOCommandGate::Action, this, &YogaVPC::setPropertiesGated), props);
+IOReturn YogaVPC::setPropertiesResultGated(OSObject *props) {
+    if (!OSDynamicCast(OSDictionary, props))
+        return kIOReturnBadArgument;
+    setPropertiesGated(props);
     return kIOReturnSuccess;
+}
+
+IOReturn YogaVPC::setProperties(OSObject *props) {
+    if (!commandGate || isInactive())
+        return kIOReturnNotReady;
+    return commandGate->runAction(OSMemberFunctionCast(IOCommandGate::Action, this, &YogaVPC::setPropertiesResultGated), props);
 }
 
 bool YogaVPC::updateClamshell(bool update) {

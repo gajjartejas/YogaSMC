@@ -1,0 +1,12 @@
+name: Hardware-free regressions
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  regressions:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test production functions with ASan and UBSan
+        run: python3 Tests/run_regressions.py

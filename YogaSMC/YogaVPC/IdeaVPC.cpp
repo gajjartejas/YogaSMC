@@ -166,6 +166,59 @@ IOReturn IdeaVPC::message(UInt32 type, IOService *provider, void *argument) {
     return kIOReturnSuccess;
 }
 
+IOReturn IdeaVPC::setPropertiesResultGated(OSObject *props) {
+    OSDictionary *dict = OSDynamicCast(OSDictionary, props);
+    if (!dict)
+        return kIOReturnBadArgument;
+    OSCollectionIterator *iterator = OSCollectionIterator::withCollection(dict);
+    if (!iterator)
+        return kIOReturnNoMemory;
+    IOReturn result = kIOReturnSuccess;
+    while (OSString *key = OSDynamicCast(OSString, iterator->getNextObject())) {
+        IOReturn status = kIOReturnSuccess;
+        if (key->isEqualTo(conservationPrompt) || key->isEqualTo(rapidChargePrompt)) {
+            const bool rapid = key->isEqualTo(rapidChargePrompt);
+            OSBoolean *value = OSDynamicCast(OSBoolean, dict->getObject(key));
+            if (value == nullptr) {
+#ifdef DEBUG
+                // Preserve the debug-only raw SBMC command interface.
+                OSNumber *raw = rapid ? nullptr : OSDynamicCast(OSNumber, dict->getObject(key));
+                if (raw != nullptr) {
+                    status = evaluateIntegerParam(setBatteryMode, nullptr, raw->unsigned8BitValue());
+                    if (status == kIOReturnSuccess && !updateBattery(false)) status = kIOReturnIOError;
+                } else
+#endif
+                status = kIOReturnBadArgument;
+            } else if (rapid && !rapidChargeCap) {
+                status = kIOReturnUnsupported;
+            } else if (!updateBattery(false)) {
+                status = kIOReturnIOError;
+            } else if (value->getValue() != (rapid ? rapidChargeMode : conservationMode)) {
+                // conservationModeLock gates automatic SMC requests during boot.
+                // Explicit user requests follow the legacy pane's manual path;
+                // do not clear the SMC lock or treat it as an admin permission.
+                if (!(rapid ? toggleRapidCharge() : toggleConservation()))
+                    status = kIOReturnIOError;
+            }
+        } else {
+            OSDictionary *entry = OSDictionary::withCapacity(1);
+            if (!entry) {
+                status = kIOReturnNoMemory;
+            } else {
+                entry->setObject(key, dict->getObject(key));
+                // Non-charging keys keep the existing subclass behaviour.
+                setPropertiesGated(entry);
+                entry->release();
+            }
+        }
+        // Dictionaries are best-effort, not atomic: process every key and return
+        // the first error so callers know at least one requested change failed.
+        if (result == kIOReturnSuccess && status != kIOReturnSuccess) result = status;
+    }
+    iterator->release();
+    return result;
+}
+
 void IdeaVPC::setPropertiesGated(OSObject *props) {
     OSDictionary *dict = OSDynamicCast(OSDictionary, props);
     if (!dict)
@@ -389,8 +442,8 @@ UInt16 extractBatteryCycle(OSObject *raw) {
 
     if ((number = OSDynamicCast(OSNumber, raw)) != nullptr)
         ret = number->unsigned16BitValue();
-    else if ((data = OSDynamicCast(OSData, raw)))
-        ret = reinterpret_cast<const UInt16 *>(data->getBytesNoCopy())[0];
+    else if ((data = OSDynamicCast(OSData, raw)) && data->getLength() >= sizeof(ret))
+        memcpy(&ret, data->getBytesNoCopy(), sizeof(ret));
 
     return ret;
 }
@@ -402,8 +455,8 @@ UInt64 extractBatteryID(OSObject *raw) {
 
     if ((number = OSDynamicCast(OSNumber, raw)) != nullptr)
         ret = number->unsigned64BitValue();
-    else if ((data = OSDynamicCast(OSData, raw)))
-        ret = reinterpret_cast<const UInt64 *>(data->getBytesNoCopy())[0];
+    else if ((data = OSDynamicCast(OSData, raw)) && data->getLength() >= sizeof(ret))
+        memcpy(&ret, data->getBytesNoCopy(), sizeof(ret));
 
     return ret;
 }
@@ -431,7 +484,7 @@ bool IdeaVPC::updateBatteryID(OSDictionary *bat0, OSDictionary *bat1) {
     UInt16 cycle;
     cycle = extractBatteryCycle(data->getObject(0));
     if (cycle != 0xffff) {
-        snprintf(batString, 5, "%d", cycle);
+        snprintf(batString, sizeof(batString), "%u", cycle);
         setPropertyString(bat0, "Cycle count", batString);
         DebugLog("Battery 0 cycle count %d", cycle);
     } else {
@@ -440,7 +493,7 @@ bool IdeaVPC::updateBatteryID(OSDictionary *bat0, OSDictionary *bat1) {
 
     cycle = extractBatteryCycle(data->getObject(1));
     if (cycle != 0xffff) {
-        snprintf(batString, 5, "%d", cycle);
+        snprintf(batString, sizeof(batString), "%u", cycle);
         setPropertyString(bat1, "Cycle count", batString);
         DebugLog("Battery 1 cycle count %d", cycle);
     } else {
@@ -475,7 +528,7 @@ bool IdeaVPC::updateBatteryID(OSDictionary *bat0, OSDictionary *bat1) {
 
 OSData *IdeaVPC::extractBatteryInfo(UInt32 index) {
     OSData *data = nullptr;
-    OSObject *result;
+    OSObject *result = nullptr;
 
     OSObject* params[1] = {
         OSNumber::withNumber(index, 32),
@@ -485,15 +538,18 @@ OSData *IdeaVPC::extractBatteryInfo(UInt32 index) {
     params[0]->release();
 
     if (ret == kIOReturnSuccess) {
-        if ((data = OSDynamicCast(OSData, result))) {
-            if (reinterpret_cast<const UInt64*>(data->getBytesNoCopy())[0] != 0) {
+        if ((data = OSDynamicCast(OSData, result)) && data->getLength() >= 20) {
+            UInt64 header = 0;
+            memcpy(&header, data->getBytesNoCopy(), sizeof(header));
+            if (header != 0) {
                 data->retain();
             } else {
                 data = nullptr;
                 DebugLog("Battery Info %d is empty", index);
             }
         } else {
-            DebugLog("Battery Info %d not OSData", index);
+            data = nullptr;
+            DebugLog("Battery Info %d is not OSData or is shorter than 20 bytes", index);
         }
     } else {
         DebugLog(updateFailure, "Battery Info");
@@ -510,7 +566,12 @@ bool IdeaVPC::updateBatteryInfo(OSDictionary *bat0, OSDictionary *bat1) {
     setProperty("raw battery Info", data);
 #endif
     OSString *value;
-    const UInt16 * bdata = reinterpret_cast<const UInt16 *>(data->getBytesNoCopy());
+    UInt16 bdata[10];
+    if (data->getLength() < sizeof(bdata)) {
+        data->release();
+        return false;
+    }
+    memcpy(bdata, data->getBytesNoCopy(), sizeof(bdata));
     // B1TM
     if (bdata[7] != 0) {
         SInt16 celsius = bdata[7] - 2731;
@@ -622,34 +683,34 @@ bool IdeaVPC::toggleAlwaysOnUSB() {
 }
 
 bool IdeaVPC::toggleConservation() {
-    IOReturn ret = evaluateIntegerParam(setBatteryMode, nullptr, conservationMode ? BMCMD0_CONSERVATION_OFF : BMCMD0_CONSERVATION_ON);
+    const bool requested = !conservationMode;
+    IOReturn ret = evaluateIntegerParam(setBatteryMode, nullptr, requested ? BMCMD0_CONSERVATION_ON : BMCMD0_CONSERVATION_OFF);
     if (ret != kIOReturnSuccess) {
         AlwaysLog(toggleError, conservationPrompt, ret);
         return false;
     }
-
-    conservationMode = !conservationMode;
-    DebugLog(toggleSuccess, conservationPrompt, (conservationMode ? BMCMD0_CONSERVATION_ON : BMCMD0_CONSERVATION_OFF), (conservationMode ? "on" : "off"));
-    setProperty(conservationPrompt, conservationMode);
-
+    // Publish GBMD's state, never an optimistic copy of the request.
+    if (!updateBattery(false) || conservationMode != requested) {
+        AlwaysLog(toggleFailure, conservationPrompt);
+        return false;
+    }
     notifyBattery();
     return true;
 }
 
 bool IdeaVPC::toggleRapidCharge() {
     if (!rapidChargeCap)
-        return true;
-
-    IOReturn ret = evaluateIntegerParam(setBatteryMode, nullptr, rapidChargeMode ? BMCMD0_RAPIDCHARGE_OFF : BMCMD0_RAPIDCHARGE_ON);
+        return false;
+    const bool requested = !rapidChargeMode;
+    IOReturn ret = evaluateIntegerParam(setBatteryMode, nullptr, requested ? BMCMD0_RAPIDCHARGE_ON : BMCMD0_RAPIDCHARGE_OFF);
     if (ret != kIOReturnSuccess) {
         AlwaysLog(toggleError, rapidChargePrompt, ret);
         return false;
     }
-
-    rapidChargeMode = !rapidChargeMode;
-    DebugLog(toggleSuccess, rapidChargePrompt, (rapidChargeMode ? BMCMD0_RAPIDCHARGE_ON : BMCMD0_RAPIDCHARGE_OFF), (rapidChargeMode ? "on" : "off"));
-    setProperty(rapidChargePrompt, conservationMode);
-
+    if (!updateBattery(false) || rapidChargeMode != requested) {
+        AlwaysLog(toggleFailure, rapidChargePrompt);
+        return false;
+    }
     return true;
 }
 
