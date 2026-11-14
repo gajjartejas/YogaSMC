@@ -100,6 +100,10 @@ Some features may rely on methods accessing EC, please consider [ECEnabler](http
 
 The `YogaSMCAlter.kext` is a variant without SMC keys support and the dependencies of `Lilu` and `VirtualSMC`. It's designed for quick loading / unloading without reboot when debugging. 
 
+## IdeaPad charging and EC robustness
+
+This fork includes the 2.0.1 IdeaPad charging, battery-buffer and EC input fixes. See [LOCAL_CHANGES.md](LOCAL_CHANGES.md) for behaviour changes and reproducible build inputs, and [VALIDATION.md](VALIDATION.md) for test results and hardware limits. YogaSMCPane remains unchanged.
+
 ## Building
 1. Copy latest debug version of [Lilu.kext](https://github.com/acidanthera/Lilu/releases/latest) and [VirtualSMC.kext](https://github.com/acidanthera/VirtualSMC/releases/latest) into the folder
 2. `git clone --depth 1 https://github.com/acidanthera/MacKernelSDK`

@@ -204,6 +204,7 @@ IOReturn YogaBaseService::setPowerState(unsigned long powerStateOrdinal, IOServi
 }
 
 IOReturn YogaBaseService::readECName(const char* name, UInt32 *result) {
+    if (!name || !result) return kIOReturnBadArgument;
     if (!ec) return kIOReturnNoDevice;
     IOReturn ret = ec->evaluateInteger(name, result);
     switch (ret) {
@@ -222,10 +223,12 @@ IOReturn YogaBaseService::readECName(const char* name, UInt32 *result) {
 }
 
 IOReturn YogaBaseService::method_re1b(UInt32 offset, UInt8 *result) {
+    if (!result || offset >= 0x100)
+        return kIOReturnBadArgument;
     if (!ec || !(ECAccessCap & ECReadCap))
         return kIOReturnUnsupported;
 
-    UInt32 raw;
+    UInt32 raw = 0;
     OSObject* params[1] = {
         OSNumber::withNumber(offset, 32)
     };
@@ -233,14 +236,21 @@ IOReturn YogaBaseService::method_re1b(UInt32 offset, UInt8 *result) {
     IOReturn ret = ec->evaluateInteger(readECOneByte, &raw, params, 1);
     params[0]->release();
 
-    if (ret != kIOReturnSuccess)
+    if (ret != kIOReturnSuccess) {
         AlwaysLog("read 0x%02x failed", offset);
+        return ret;
+    }
 
     *result = raw;
     return ret;
 }
 
 IOReturn YogaBaseService::method_recb(UInt32 offset, UInt32 size, OSData **data) {
+    if (!data)
+        return kIOReturnBadArgument;
+    *data = nullptr;
+    if (offset >= 0x100 || !size || size > 0x100 - offset)
+        return kIOReturnBadArgument;
     if (!ec || !(ECAccessCap & BIT(0)))
         return kIOReturnUnsupported;
 
@@ -250,7 +260,7 @@ IOReturn YogaBaseService::method_recb(UInt32 offset, UInt32 size, OSData **data)
         OSNumber::withNumber(offset, 32),
         OSNumber::withNumber(size * 8, 32)
     };
-    OSObject* result;
+    OSObject* result = nullptr;
 
     IOReturn ret = ec->evaluateObject(readECBytes, &result, params, 2);
     params[0]->release();
@@ -259,12 +269,14 @@ IOReturn YogaBaseService::method_recb(UInt32 offset, UInt32 size, OSData **data)
     if (ret != kIOReturnSuccess || !(*data = OSDynamicCast(OSData, result))) {
         AlwaysLog("read %d bytes @ 0x%02x failed", size, offset);
         OSSafeReleaseNULL(result);
+        *data = nullptr;
         return kIOReturnInvalid;
     }
 
     if ((*data)->getLength() != size) {
         AlwaysLog("read %d bytes @ 0x%02x, got %d bytes", size, offset, (*data)->getLength());
         OSSafeReleaseNULL(result);
+        *data = nullptr;
         return kIOReturnNoBandwidth;
     }
 
@@ -292,20 +304,25 @@ IOReturn YogaBaseService::method_we1b(UInt32 offset, UInt8 value) {
 }
 
 void YogaBaseService::validateEC() {
-    if (!ec)
-        return;
-    if (ec->validateObject(readECOneByte) != kIOReturnSuccess ||
-        ec->validateObject(readECBytes) != kIOReturnSuccess) {
+    ECAccessCap = 0;
+    const bool singleRead = ec && ec->validateObject(readECOneByte) == kIOReturnSuccess;
+    const bool bulkRead = ec && ec->validateObject(readECBytes) == kIOReturnSuccess;
+    const bool singleWrite = ec && ec->validateObject(writeECOneByte) == kIOReturnSuccess;
+    setProperty("EC Read Byte Method", singleRead);
+    setProperty("EC Read Buffer Method", bulkRead);
+    setProperty("EC Write Byte Method", singleWrite);
+    if (!ec) {
+        setProperty("EC Capability", "Unavailable");
+        setProperty("EC Capability Reason", "EC device not found");
+    } else if (!singleRead || !bulkRead) {
         setProperty("EC Capability", "Basic");
-        return;
+        setProperty("EC Capability Reason", "Direct EC access requires both RE1B and RECB");
+    } else {
+        ECAccessCap = ECReadCap;
+        if (singleWrite) ECAccessCap |= ECWriteCap;
+        setProperty("EC Capability", singleWrite ? "RW" : "RO");
+        setProperty("EC Capability Reason", singleWrite ? "RE1B, RECB and WE1B present; method availability only" : "Read helpers present; WE1B missing");
     }
-    ECAccessCap |= ECReadCap;
-    if (ec->validateObject(writeECOneByte) != kIOReturnSuccess) {
-        setProperty("EC Capability", "RO");
-        return;
-    }
-    ECAccessCap |= ECWriteCap;
-    setProperty("EC Capability", "RW");
 }
 
 void YogaBaseService::dispatchKeyEvent(UInt16 keyCode, bool goingDown, bool time) {

@@ -180,6 +180,8 @@ protected:
     virtual bool exitVPC();
 
     virtual void setPropertiesGated(OSObject* props);
+    // Result-aware path; existing subclasses retain their legacy property handling.
+    virtual IOReturn setPropertiesResultGated(OSObject* props);
 
     /**
      *  Automatically turn off backlight mode on sleep
